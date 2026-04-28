@@ -125,6 +125,8 @@ def _num(val):
 
 
 def _first(row) -> str:
+    if not row:
+        return ""
     return str(row[0].value).strip() if row[0].value is not None else ""
 
 
@@ -236,29 +238,79 @@ def _parse_equipment(ws) -> dict:
 
 def _parse_consumables(ws) -> dict:
     """
-    Wide-table CONSUMABLES sheet — one item per row:
+    Wide-table CONSUMABLES sheet — one item per row.
+
+    Standard columns (fixed mapping):
       Consumable Key | Step | Unit Cost (INR) | Qty/Sample |
       Batch Size | Unit of Measure | Notes
 
-    Qty/Sample "derived" → None  (fuel, ice_pack — computed from SURVEILLANCE)
+    Extra columns (col 7 onward, snake_case headers):
+      Any column whose header is already snake_case is added to the item dict
+      using the header as the key.  Blank / None values are omitted.
+      Example: fuel_consumption_km_per_litre → stored only for rows that
+      have a value; silently skipped for all others.
+
+    Qty/Sample "derived" → None  (fuel, ice_pack — computed from other inputs)
     Batch Size "—"       → None  (not a batch consumable)
     Section headers with spaces are decorative and skipped.
     """
+    # Standard columns: index → Python field name (None = skip)
+    # Notes is intentionally absent — it is excluded by name in the header scan
+    # below, so it can sit at any position (including last) without breaking the
+    # extra-column detection.
+    _STANDARD = {
+        0: None,              # Consumable Key — used as dict key
+        1: "step",
+        2: "unit_cost_inr",
+        3: "qty_per_sample",  # "derived" → None
+        4: "batch_size",      # "—" → None
+        5: "unit",
+    }
+
+    # Read all rows to find the header row first, then parse data rows
+    all_rows = list(ws.iter_rows(min_col=1))
+
+    # Find header row: first row whose first cell is "Consumable Key" (case-insensitive)
+    header_row   = None
+    extra_cols   = {}  # col_index → field_name for columns beyond the standard set
+    for row in all_rows:
+        f = _first(row)
+        if f.lower() in ("consumable key", "consumablekey"):
+            header_row = row
+            for i, cell in enumerate(row):
+                if i in _STANDARD:
+                    continue
+                h = str(cell.value).strip() if cell.value else ""
+                # Only treat as an extra field if the header is snake_case
+                if h and " " not in h and h.lower() not in ("notes", ""):
+                    extra_cols[i] = h
+            break
+
     result = {}
-    for row in ws.iter_rows(min_col=1, max_col=7):
+    for row in all_rows:
         f = _first(row)
         if _is_skip(f):
             continue
         if _is_section_header(f):
             continue
+        if header_row is not None and row is header_row:
+            continue
 
-        result[f] = {
+        item = {
             "step":           _coerce(_cell(row, 1)),
             "unit_cost_inr":  _coerce(_cell(row, 2)),
-            "qty_per_sample": _coerce(_cell(row, 3)),  # "derived" → None
-            "batch_size":     _coerce(_cell(row, 4)),  # "—" → None
+            "qty_per_sample": _coerce(_cell(row, 3)),
+            "batch_size":     _coerce(_cell(row, 4)),
             "unit":           _coerce(_cell(row, 5)),
         }
+
+        # Attach any extra column values (e.g. fuel_consumption_km_per_litre)
+        for col_idx, field_name in extra_cols.items():
+            val = _coerce(_cell(row, col_idx))
+            if val is not None:
+                item[field_name] = val
+
+        result[f] = item
     return result
 
 
@@ -306,20 +358,41 @@ def _read_workbook(path: str) -> dict:
     }
 
     # ── Fuel injection ───────────────────────────────────────────────────────
-    # consumable_calculator._fuel_cost_per_sample() reads two fields that are
-    # not columns in the CONSUMABLES tab.  They must be present in SURVEILLANCE:
-    #   • total_distance_per_week_km
-    #   • fuel_consumption_km_per_litre
+    # consumable_calculator._fuel_cost_per_sample() needs two extra fields
+    # inside the fuel consumable dict:
+    #
+    #   total_distance_per_week_km   — derived automatically:
+    #       EQUIPMENT["vehicle"]["time_per_batch_min"] × SURVEILLANCE["vehicle_speed_km_per_min"]
+    #       e.g. 235 × 0.6667 ≈ 156.67 km  (no sheet change needed)
+    #
+    #   fuel_consumption_km_per_litre — read from the fuel row in the CONSUMABLES
+    #       tab (extra column at the end of the row, e.g. value = 25)
     if "fuel" in result["CONSUMABLES"]:
-        surv = result["SURVEILLANCE"]
-        fuel = result["CONSUMABLES"]["fuel"]
-        for key in ("total_distance_per_week_km", "fuel_consumption_km_per_litre"):
-            if key not in surv:
-                raise ValueError(
-                    f"SURVEILLANCE tab is missing '{key}', which is required to "
-                    f"compute fuel cost. Add this parameter to the SURVEILLANCE sheet."
-                )
-            fuel[key] = surv[key]
+        surv  = result["SURVEILLANCE"]
+        equip = result["EQUIPMENT"]
+        fuel  = result["CONSUMABLES"]["fuel"]
+
+        # Derive total weekly driving distance from vehicle equipment entry
+        vehicle       = equip.get("vehicle", {})
+        vehicle_time  = vehicle.get("time_per_batch_min")
+        vehicle_speed = surv.get("vehicle_speed_km_per_min")
+        if vehicle_time is None or vehicle_speed is None:
+            raise ValueError(
+                "Cannot compute 'total_distance_per_week_km' for fuel cost. "
+                "Ensure the EQUIPMENT tab has a 'vehicle' row with 'time_per_batch_min' "
+                "and the SURVEILLANCE tab has 'vehicle_speed_km_per_min'."
+            )
+        fuel["total_distance_per_week_km"] = vehicle_time * vehicle_speed
+
+        # fuel_consumption_km_per_litre must come from the CONSUMABLES sheet
+        # as an extra column on the fuel row
+        if "fuel_consumption_km_per_litre" not in fuel or fuel["fuel_consumption_km_per_litre"] is None:
+            raise ValueError(
+                "The fuel row in the CONSUMABLES tab is missing 'fuel_consumption_km_per_litre'. "
+                "Add it as an extra column at the end of the CONSUMABLES sheet "
+                "(e.g. column header = fuel_consumption_km_per_litre, value = 25)."
+            )
+
 
     return result
 
