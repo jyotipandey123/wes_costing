@@ -77,6 +77,46 @@ python -m unittest discover -s tests -v
 
 ---
 
+## Usage — Specifying an Input Sheet
+
+By default the model looks for `WES_Inputs.xlsx` in the current working
+directory.  Use `--input_sheet` to point to a different file or a live Google
+Sheet.
+
+```bash
+# 1. Default — WES_Inputs.xlsx in the current directory
+python main.py
+
+# 2. Local file at an explicit path
+python main.py --input_sheet ./path/to/WES_Inputs.xlsx
+
+# 3. Live Google Sheet (publicly shared)
+python main.py --input_sheet "https://docs.google.com/spreadsheets/d/SHEET_ID/edit"
+```
+
+`--input_sheet` can be combined freely with `--sites`, `--scale`, and `--usd`:
+
+```bash
+python main.py --input_sheet ./WES_Inputs.xlsx --sites 50 --usd
+python main.py --input_sheet "https://docs.google.com/..." --scale
+```
+
+### Google Sheets requirement
+
+The sheet **must be publicly shared** with "Anyone with the link can view".
+If the sheet is private the download will fail with a 403 error and the model
+will print a clear message asking you to check the sharing settings.
+
+The model accepts either:
+- A standard edit/view URL (`/d/SHEET_ID/edit`) — the sheet ID is extracted
+  automatically and an export URL is constructed.
+- An already-formed export URL (`/d/SHEET_ID/export?format=xlsx`).
+
+The downloaded file is saved to a temporary location and deleted automatically
+after the model finishes.
+
+---
+
 ## How to Change Inputs
 
 All inputs live in **`config/inputs.py`**. Never edit the calculator files to change values — only edit `inputs.py`.

@@ -4,17 +4,25 @@ main.py
 Entry point for the WES Costing Model.
 
 Usage:
-    python main.py                    # Run default config (10 sites)
-    python main.py --sites 40         # Run for a specific site count
-    python main.py --scale            # Print cost curve across 10–100 sites
-    python main.py --sites 20 --usd   # Output in USD
+    python main.py                                        # default WES_Inputs.xlsx, 10 sites
+    python main.py --sites 40                             # specific site count
+    python main.py --scale                                # cost curve across 10-100 sites
+    python main.py --sites 20 --usd                       # output in USD
+    python main.py --input_sheet ./path/to/WES_Inputs.xlsx
+    python main.py --input_sheet "https://docs.google.com/spreadsheets/d/SHEET_ID/..."
 
 Example:
     python main.py --scale
 """
 
 import argparse
+import os
+import sys
+import urllib.error
+
 from calculators.aggregator import compute_cost_summary, compute_scale_curve
+from config.loader import load_all_inputs
+from utils.sheet_reader import is_url
 
 
 # ── Formatting helpers ──────────────────────────────────────────────────────
@@ -27,8 +35,21 @@ def print_divider(char: str = "─", width: int = 60):
     print(char * width)
 
 
-def print_summary_report(num_sites: int, use_usd: bool = False):
-    summary = compute_cost_summary(num_sites=num_sites)
+def _config_kwargs(configs: dict) -> dict:
+    return {
+        "surveillance": configs["SURVEILLANCE"],
+        "constants": configs["CONSTANTS"],
+        "hr_config": configs["HR"],
+        "equipment_config": configs["EQUIPMENT"],
+        "consumable_config": configs["CONSUMABLES"],
+        "overhead_config": configs["OVERHEAD"],
+        "annualization": configs["ANNUALIZATION"],
+    }
+
+
+def print_summary_report(num_sites: int, use_usd: bool = False, configs: dict = None):
+    kwargs = _config_kwargs(configs) if configs else {}
+    summary = compute_cost_summary(num_sites=num_sites, **kwargs)
     currency = "$" if use_usd else "₹"
     rate = summary.cost_per_sample_usd if use_usd else summary.cost_per_sample_inr
     denom = summary.cost_per_sample_inr  # always INR for component breakdowns
@@ -73,8 +94,9 @@ def print_summary_report(num_sites: int, use_usd: bool = False):
     print()
 
 
-def print_scale_curve():
-    curve = compute_scale_curve()
+def print_scale_curve(configs: dict = None):
+    kwargs = _config_kwargs(configs) if configs else {}
+    curve = compute_scale_curve(**kwargs)
 
     print()
     print_divider("═")
@@ -96,15 +118,55 @@ def print_scale_curve():
 
 def main():
     parser = argparse.ArgumentParser(description="WES Costing Model")
-    parser.add_argument("--sites", type=int, default=10, help="Number of surveillance sites")
-    parser.add_argument("--scale", action="store_true", help="Print cost curve across site counts")
-    parser.add_argument("--usd", action="store_true", help="Show costs in USD")
+    parser.add_argument("--sites", type=int, default=10,
+                        help="Number of surveillance sites")
+    parser.add_argument("--scale", action="store_true",
+                        help="Print cost curve across site counts")
+    parser.add_argument("--usd", action="store_true",
+                        help="Show costs in USD")
+    parser.add_argument(
+        "--input_sheet",
+        type=str,
+        default="WES_Inputs.xlsx",
+        help=(
+            "Local file path or Google Sheets URL for input data "
+            "(default: WES_Inputs.xlsx in the current directory)"
+        ),
+    )
     args = parser.parse_args()
 
-    if args.scale:
-        print_scale_curve()
+    if is_url(args.input_sheet):
+        print(f"Loading inputs from: Google Sheets (downloading...)")
     else:
-        print_summary_report(num_sites=args.sites, use_usd=args.usd)
+        print(f"Loading inputs from: {args.input_sheet}")
+
+    try:
+        configs = load_all_inputs(args.input_sheet)
+    except FileNotFoundError:
+        print(f"Input file not found: {args.input_sheet} — check the path and try again")
+        sys.exit(1)
+    except urllib.error.URLError as exc:
+        print(
+            f"Could not download input sheet from: {args.input_sheet}\n"
+            "The sheet must be publicly shared with 'Anyone with the link can view'.\n"
+            f"Error: {exc}"
+        )
+        sys.exit(1)
+    except ValueError as exc:
+        print(str(exc))
+        sys.exit(1)
+
+    try:
+        if args.scale:
+            print_scale_curve(configs)
+        else:
+            print_summary_report(num_sites=args.sites, use_usd=args.usd, configs=configs)
+    finally:
+        if configs.get("_is_temp"):
+            try:
+                os.unlink(configs["_resolved_path"])
+            except OSError:
+                pass
 
 
 if __name__ == "__main__":

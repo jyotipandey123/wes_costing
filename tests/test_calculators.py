@@ -10,6 +10,8 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import unittest
+from unittest.mock import patch
+from utils.sheet_reader import is_url, resolve_input_sheet
 from utils.finance import (
     annualization_factor,
     annual_equivalent_cost,
@@ -326,6 +328,81 @@ class TestScaleCurve(unittest.TestCase):
         row = curve[0]
         for key in ["sites", "cost_per_sample_inr", "cost_per_month_inr", "step_breakdown"]:
             assert key in row
+
+# ──────────────────────────────────────────────────────────────
+# Sheet Reader
+# ──────────────────────────────────────────────────────────────
+
+class TestIsUrl(unittest.TestCase):
+    def test_google_sheets_url_is_true(self):
+        assert is_url("https://docs.google.com/spreadsheets/d/abc123/edit") is True
+
+    def test_http_url_is_true(self):
+        assert is_url("http://example.com/file.xlsx") is True
+
+    def test_local_relative_path_is_false(self):
+        assert is_url("./WES_Inputs.xlsx") is False
+
+    def test_local_bare_filename_is_false(self):
+        assert is_url("WES_Inputs.xlsx") is False
+
+    def test_local_absolute_path_is_false(self):
+        assert is_url("/tmp/WES_Inputs.xlsx") is False
+
+
+class TestResolveInputSheet(unittest.TestCase):
+    def test_nonexistent_local_path_raises_file_not_found(self):
+        with self.assertRaises(FileNotFoundError):
+            resolve_input_sheet("/nonexistent/path/to/file.xlsx")
+
+    def test_malformed_url_no_sheet_id_raises_value_error(self):
+        with self.assertRaises(ValueError) as ctx:
+            resolve_input_sheet("https://docs.google.com/no-sheet-id-here")
+        assert "Could not extract" in str(ctx.exception)
+
+    @patch("urllib.request.urlretrieve")
+    def test_valid_google_sheets_url_downloads_to_temp_xlsx(self, mock_retrieve):
+        def fake_retrieve(url, dest):
+            with open(dest, "wb") as f:
+                f.write(b"PK\x03\x04")  # minimal xlsx magic bytes
+
+        mock_retrieve.side_effect = fake_retrieve
+
+        path = resolve_input_sheet(
+            "https://docs.google.com/spreadsheets/d/abc123XYZ/edit"
+        )
+        try:
+            assert path.endswith(".xlsx")
+            assert os.path.isfile(path)
+            # The export URL passed to urlretrieve should embed the sheet ID
+            called_url = mock_retrieve.call_args[0][0]
+            assert "abc123XYZ" in called_url
+            assert "export?format=xlsx" in called_url
+        finally:
+            if os.path.isfile(path):
+                os.unlink(path)
+
+    @patch("urllib.request.urlretrieve")
+    def test_export_url_passed_through_unchanged(self, mock_retrieve):
+        """If the URL already contains export?format=xlsx, it is used as-is."""
+        export_url = (
+            "https://docs.google.com/spreadsheets/d/abc123/export?format=xlsx"
+        )
+
+        def fake_retrieve(url, dest):
+            assert url == export_url
+            with open(dest, "wb") as f:
+                f.write(b"PK\x03\x04")
+
+        mock_retrieve.side_effect = fake_retrieve
+
+        path = resolve_input_sheet(export_url)
+        try:
+            assert path.endswith(".xlsx")
+        finally:
+            if os.path.isfile(path):
+                os.unlink(path)
+
 
 if __name__ == '__main__':
     unittest.main()
